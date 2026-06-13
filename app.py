@@ -152,12 +152,14 @@ def render_auto_chart(df: pd.DataFrame) -> None:
 
 
 def render_sidebar() -> str | None:
-    """Render the secure sidebar and return the API key (or None)."""
+    """Render the secure sidebar and return the active API key."""
     st.sidebar.header("Configuration")
-    api_key = st.sidebar.text_input(
+    
+    # Input field allows manual key override
+    api_key_input = st.sidebar.text_input(
         "Gemini API Key",
         type="password",
-        placeholder="AQ.Ab8...",
+        placeholder="Leave blank to use default demo key...",
         help="Your API key is used only in this session and never stored.",
     )
 
@@ -176,7 +178,11 @@ def render_sidebar() -> str | None:
             "- List products with stock count below 50"
         )
 
-    return api_key if api_key and api_key.strip() else None
+    # Resolve fallback logic: use manual key first, then look for a secret
+    if api_key_input and api_key_input.strip():
+        return api_key_input.strip()
+    
+    return st.secrets.get("GEMINI_API_KEY", None)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +220,7 @@ def main() -> None:
         return
 
     if not api_key:
-        st.warning("Please enter your Gemini API key in the sidebar.")
+        st.warning("Please enter your Gemini API key in the sidebar or configure it in Streamlit Secrets.")
         return
 
     # --- Execute agent pipeline ---
