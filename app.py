@@ -1,260 +1,300 @@
-"""
-NL-to-SQL Analytics Agent — Streamlit frontend.
-
-Provides a wide-layout dashboard for natural language database queries
-with transparent SQL display, tabular results, and auto-generated charts.
-"""
-
-from __future__ import annotations
-
-import sys
-from pathlib import Path
-
-import pandas as pd
-import plotly.express as px
 import streamlit as st
+import pandas as pd
+import os
+import re
+import sqlite3
 
-# Ensure the project root is on sys.path for `src` imports.
-PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.agent import NLToSQLAgent
+# Import our cleanly exported modules from our src package configuration
+from src.agent import AnalyticsAgent
 from src.database import DatabaseManager
 
-# ---------------------------------------------------------------------------
-# Page configuration
-# ---------------------------------------------------------------------------
-
+# Page Styling Customizations
 st.set_page_config(
-    page_title="NL-to-SQL Analytics Agent",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
+    page_title="E-Commerce AI Analytics Console",
+    page_icon="🛒",
+    layout="wide"
 )
 
-# ---------------------------------------------------------------------------
-# Cached resources
-# ---------------------------------------------------------------------------
+# Custom premium CSS insertion for layout polish matching Screenshot 2026-06-19 222135.png
+st.markdown("""
+<style>
+    .reportview-container {
+        background: #f8f9fa;
+    }
+    .stButton>button {
+        background-color: #ff4b4b;
+        color: white;
+        border-radius: 6px;
+        font-weight: bold;
+        border: none;
+        transition: all 0.2s ease-in-out;
+    }
+    .stButton>button:hover {
+        background-color: #ff3333;
+        transform: translateY(-1px);
+    }
+    .sql-box {
+        background-color: #f1f3f5;
+        border-left: 4px solid #1c7ed6;
+        padding: 15px;
+        border-radius: 4px;
+        font-family: 'Courier New', Courier, monospace;
+    }
+    .stMetric {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    }
+</style>
+""", unsafe_allow_html=True)
 
-
+# --- BACKEND INITIALIZATION CACHE ---
 @st.cache_resource
-def get_database() -> DatabaseManager:
-    """Initialize the database manager once per session (auto-seeds if needed)."""
-    return DatabaseManager()
+def initialize_analytics_backend():
+    db_path = "./data/ecommerce.db"
+    os.makedirs("./data", exist_ok=True)
+    agent = AnalyticsAgent()
+    db_mgr = DatabaseManager(db_path=db_path)
+    return agent, db_mgr
 
+try:
+    agent, db_mgr = initialize_analytics_backend()
+except Exception as e:
+    st.error(f"Backend Engine Bootstrap Error: {e}")
+    st.stop()
 
-# ---------------------------------------------------------------------------
-# Visualization helper
-# ---------------------------------------------------------------------------
-
-
-def _detect_chart_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
-    """
-    Identify the best categorical (x) and numeric (y) columns for charting.
-
-    Returns (x_col, y_col) or (None, None) if no suitable pairing exists.
-    """
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    categorical_cols = df.select_dtypes(
-        include=["object", "string", "category"]
-    ).columns.tolist()
-
-    if not numeric_cols or not categorical_cols:
-        return None, None
-
-    # Prefer the first categorical column with moderate cardinality.
-    x_col = None
-    for col in categorical_cols:
-        unique_count = df[col].nunique()
-        if 1 < unique_count <= 50:
-            x_col = col
-            break
-
-    if x_col is None and categorical_cols:
-        x_col = categorical_cols[0]
-
-    # Pick the first numeric column that isn't likely an ID.
-    y_col = None
-    for col in numeric_cols:
-        if not col.lower().endswith("id") and col.lower() != "id":
-            y_col = col
-            break
-
-    if y_col is None:
-        y_col = numeric_cols[0]
-
-    return x_col, y_col
-
-
-def render_auto_chart(df: pd.DataFrame) -> None:
-    """
-    Automatically render a Plotly Express chart when the data supports it.
-
-    Requires at least one numeric and one categorical column.
-    Chooses bar vs. line based on row count and column characteristics.
-    """
-    if df.empty:
-        return
-
-    x_col, y_col = _detect_chart_columns(df)
-    if x_col is None or y_col is None:
-        return
-
-    st.subheader("Auto-Generated Visualization")
-
-    try:
-        # Use a line chart when the x-axis looks temporal or has many points.
-        x_lower = x_col.lower()
-        is_temporal_name = any(
-            token in x_lower for token in ("date", "month", "year", "time", "day")
-        )
-
-        if is_temporal_name or df[x_col].nunique() > 15:
-            fig = px.line(
-                df,
-                x=x_col,
-                y=y_col,
-                title=f"{y_col} by {x_col}",
-                markers=True,
-            )
-        else:
-            # Aggregate for cleaner bar charts when there are duplicate x values.
-            chart_df = (
-                df.groupby(x_col, as_index=False)[y_col]
-                .sum()
-                .sort_values(y_col, ascending=False)
-            )
-            fig = px.bar(
-                chart_df,
-                x=x_col,
-                y=y_col,
-                title=f"{y_col} by {x_col}",
-                color=x_col,
-            )
-
-        fig.update_layout(
-            xaxis_title=x_col,
-            yaxis_title=y_col,
-            showlegend=False,
-            margin=dict(l=40, r=40, t=60, b=40),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    except Exception:
-        # Chart generation is best-effort; never crash the UI.
-        st.info("A chart could not be generated for this result set.")
-
-
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
-
-
-def render_sidebar() -> str | None:
-    """Render the secure sidebar and return the active API key."""
-    st.sidebar.header("Configuration")
+# --- UTILITY FORMATTER FOR VERTICAL SQL RENDERING ---
+def format_sql_vertical(sql: str) -> str:
+    """Format and indent raw SQL strings vertically to ensure extreme legibility."""
+    keywords = ["SELECT", "FROM", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "JOIN", 
+                "ON", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "UNION", "AND", "OR"]
     
-    # Input field allows manual key override
-    api_key_input = st.sidebar.text_input(
-        "Gemini API Key",
-        type="password",
-        placeholder="Leave blank to use default demo key...",
-        help="Your API key is used only in this session and never stored.",
-    )
-
-    st.sidebar.divider()
-    st.sidebar.markdown(
-        "**Database:** `ecommerce.db`  \n"
-        "**Tables:** users, products, orders"
-    )
-
-    with st.sidebar.expander("Sample Questions"):
-        st.markdown(
-            "- What are the top 5 product categories by total revenue?\n"
-            "- How many orders were placed each month?\n"
-            "- Which users spent the most money?\n"
-            "- What is the average order value by category?\n"
-            "- List products with stock count below 50"
-        )
-
-    # Resolve fallback logic: use manual key first, then look for a secret
-    if api_key_input and api_key_input.strip():
-        return api_key_input.strip()
+    # Normalize extra whitespaces first
+    sql_clean = " ".join(sql.split())
     
-    return st.secrets.get("GEMINI_API_KEY", None)
-
-
-# ---------------------------------------------------------------------------
-# Main application
-# ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    """Entry point for the Streamlit application."""
-    st.title("NL-to-SQL Analytics Agent")
-    st.markdown(
-        "Ask questions about the e-commerce database in plain English. "
-        "The agent translates your question to SQL, executes it safely, "
-        "and presents results with optional auto-visualization."
-    )
-
-    api_key = render_sidebar()
-
-    st.divider()
-
-    question = st.text_area(
-        "Your Question",
-        placeholder="e.g., What are the top 5 product categories by total revenue?",
-        height=100,
-    )
-
-    run_analysis = st.button("Run Analysis", type="primary", use_container_width=False)
-
-    if not run_analysis:
-        return
-
-    # --- Input validation ---
-    if not question or not question.strip():
-        st.warning("Please enter a question before running the analysis.")
-        return
-
-    if not api_key:
-        st.warning("Please enter your Gemini API key in the sidebar or configure it in Streamlit Secrets.")
-        return
-
-    # --- Execute agent pipeline ---
-    with st.spinner("Generating and executing SQL..."):
-        try:
-            db = get_database()
-            # Synchronized argument naming with backend constructor
-            agent = NLToSQLAgent(db_manager=db, api_key=api_key)
-            
-            # Synchronized with unpacking tuple syntax from agent.run()
-            sql_query, dataframe, error_message = agent.run(question.strip())
-        except Exception as exc:
-            st.error(f"An unexpected error occurred during execution: {exc}")
-            return
-
-    # --- Render results ---
-    if error_message is None and dataframe is not None:
-        st.success("Analysis completed successfully.")
-
-        with st.expander("Generated SQL Query", expanded=False):
-            st.code(sql_query, language="sql")
-
-        st.subheader("Query Results")
-        st.dataframe(dataframe, use_container_width=True, hide_index=True)
-
-        render_auto_chart(dataframe)
-
-    else:
-        st.error(error_message or "The analysis could not be completed.")
+    # Break into vertical segments at key syntax junctions
+    formatted = sql_clean
+    for kw in keywords:
+        formatted = re.sub(rf'\b{kw}\b', f'\n{kw}', formatted, flags=re.IGNORECASE)
         
-        if sql_query:
-            with st.expander("Last Attempted SQL Query", expanded=False):
-                st.code(sql_query, language="sql")
+    for kw in keywords:
+        formatted = re.sub(rf'\b{kw}\b', kw.upper(), formatted, flags=re.IGNORECASE)
+        
+    lines = [line.strip() for line in formatted.split('\n') if line.strip()]
+    
+    # Apply modern structural indentation matching Screenshot 2026-06-19 222135.png
+    indented_lines = []
+    for line in lines:
+        upper_line = line.upper()
+        if any(upper_line.startswith(k) for k in ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "LIMIT", "JOIN", "LEFT JOIN", "INNER JOIN"]):
+            indented_lines.append(line)
+        elif upper_line.startswith("ON") or upper_line.startswith("AND") or upper_line.startswith("OR"):
+            indented_lines.append("    " + line)
+        else:
+            indented_lines.append("    " + line)
+            
+    return "\n".join(indented_lines)
 
+# --- AUTO-VISUALIZATION GENERATOR ENGINE ---
+def render_dynamic_visuals(df: pd.DataFrame, user_query: str):
+    """Scan columns dynamically to auto-select and render relevant graphical charts."""
+    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    categorical_cols = df.select_dtypes(exclude=['number']).columns.tolist()
+    
+    if not numeric_cols:
+        st.info("ℹ️ Results contain only text data. Visual charts require at least one numerical column.")
+        return  
+        
+    st.write("### 📊 Interactive Visual Analytics")
+    
+    # Prioritize values representing sales volumes, totals, revenue metrics
+    value_col = numeric_cols[0]
+    for col in numeric_cols:
+        if any(keyword in col.lower() for keyword in ['revenue', 'amount', 'total', 'count', 'sales', 'value', 'price']):
+            value_col = col
+            break
+            
+    if categorical_cols:
+        label_col = categorical_cols[0]
+        # Inspect for time series indicator variables
+        is_time_series = any(any(time_key in col.lower() for time_key in ['month', 'date', 'year', 'day', 'time', 'period']) for col in categorical_cols)
+        
+        for col in categorical_cols:
+            if any(key in col.lower() for key in ['month', 'date', 'category', 'product', 'name', 'user']):
+                label_col = col
+                break
+                
+        # Create summary metrics above charts for elegant reporting style
+        cols = st.columns(min(len(df), 3))
+        for idx, row in df.head(len(cols)).iterrows():
+            with cols[idx]:
+                st.metric(label=str(row[label_col]), value=f"${row[value_col]:,.2f}" if "revenue" in value_col.lower() or "amount" in value_col.lower() else f"{row[value_col]:,}")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    main()
+        # Draw targeted graphical representation based on temporal properties
+        if is_time_series:
+            st.info(f"Showing chronological progression of `{value_col}` grouped by `{label_col}`")
+            st.line_chart(df.set_index(label_col)[value_col], use_container_width=True)
+        else:
+            st.info(f"Distribution analysis of `{value_col}` ranked by `{label_col}`")
+            st.bar_chart(df.set_index(label_col)[value_col], use_container_width=True)
+    else:
+        # Single numerical distribution without categories
+        if len(numeric_cols) >= 2:
+            st.line_chart(df.set_index(numeric_cols[0])[numeric_cols[1]], use_container_width=True)
+        else:
+            st.bar_chart(df[value_col], use_container_width=True)
+
+# --- STREAMLIT UI SESSION STATES ---
+if "requires_approval" not in st.session_state:
+    st.session_state.requires_approval = False
+if "pending_sql" not in st.session_state:
+    st.session_state.pending_sql = ""
+if "agent_reasoning" not in st.session_state:
+    st.session_state.agent_reasoning = ""
+if "input_query_value" not in st.session_state:
+    st.session_state.input_query_value = ""
+
+# --- SIDEBAR CONTROL PANEL CONFIGURATION (Matches Screenshot 2026-06-19 222135.png) ---
+with st.sidebar:
+    st.title("Configuration")
+    
+    # Display secret or default demo fallback status safely
+    api_key_display = st.secrets.get("GEMINI_API_KEY") or "Using default demo key"
+    st.text_input(
+        "Gemini API Key", 
+        type="password", 
+        value="•" * 20 if "AQ." in api_key_display else api_key_display, 
+        disabled=True,
+        help="Protected securely via workspace secrets."
+    )
+    
+    st.markdown("---")
+    st.markdown("### Database Environment")
+    st.markdown("📁 **Database:** `ecommerce.db`")
+    st.markdown("📋 **Target Tables:** `users`, `products`, `orders`")
+    
+    st.markdown("---")
+    # Interactive sample question list helper matching the original UI blueprint
+    st.markdown("### 💡 Sample Questions")
+    samples = [
+        "What are the top 5 product categories by total revenue?",
+        "How many orders were placed each month?",
+        "Which users spent the most money?",
+        "What is the average order value by category?",
+        "List products with stock count below 50"
+    ]
+    
+    for q in samples:
+        # Clicking any button instantly sets the main input value and triggers rerun
+        if st.button(q, key=f"btn_{q}", use_container_width=True):
+            st.session_state.input_query_value = q
+            st.rerun()
+
+# --- MAIN DASHBOARD INTERFACE ---
+st.title("NL-to-SQL Analytics Console")
+st.markdown(
+    "Ask questions about the e-commerce database in plain English. The agent translates your question to SQL, "
+    "executes it safely, and presents results with beautiful vertical code layouts and auto-visualization."
+)
+
+st.divider()
+
+# Controlled dynamic text input synced with sidebar sample triggers
+user_query = st.text_area(
+    "Your Question",
+    value=st.session_state.input_query_value,
+    placeholder="e.g., What are the top 5 product categories by total revenue?",
+    height=100
+)
+
+# Execution trigger
+if st.button("Run Analysis", type="primary"):
+    if user_query:
+        # Keep query synced
+        st.session_state.input_query_value = user_query
+        
+        with st.spinner("Analyzing schema vector maps & drafting execution syntax..."):
+            try:
+                # Ask LLM model for the schema execution plan
+                agent_response = agent.generate_query(user_query)
+                st.session_state.agent_reasoning = agent_response.reasoning
+                
+                # Apply vertical syntax formatter to generated statement 
+                formatted_sql = format_sql_vertical(agent_response.sql_query)
+                
+                # Check execution permission rules inside DB Manager
+                static_safety_audit = db_mgr.check_query_safety(formatted_sql)
+                
+                if agent_response.confidence_score.upper() == "LOW" or not static_safety_audit["is_safe"]:
+                    st.session_state.requires_approval = True
+                    st.session_state.pending_sql = formatted_sql
+                else:
+                    st.session_state.requires_approval = False
+                    st.session_state.pending_sql = ""
+                    
+                    st.success("Analysis completed successfully.")
+                    
+                    # 1. RATIONALE STATEMENT
+                    st.info(agent_response.reasoning)
+                    
+                    # 2. GENERATED VERTICAL SQL SECTION (Matches Screenshot 2026-06-19 222135.png formatting)
+                    st.markdown("### 💻 Compiled SQL Syntax")
+                    st.code(formatted_sql, language="sql")
+                    
+                    # 3. QUERY RESULTS & GRAPHS
+                    try:
+                        results_df = db_mgr.execute_read_query(formatted_sql)
+                        
+                        col1, col2 = st.columns([1, 1])
+                        with col1:
+                            st.write("### 📋 Execution Matrix Results")
+                            if results_df.empty:
+                                st.warning("Query produced empty rows.")
+                            else:
+                                st.dataframe(results_df, use_container_width=True)
+                        with col2:
+                            if not results_df.empty:
+                                render_dynamic_visuals(results_df, user_query)
+                    except Exception as db_err:
+                        st.error(f"Database Query Fault: {db_err}")
+                        
+            except Exception as agent_err:
+                st.error(f"Evaluation loop failure: {agent_err}")
+    else:
+        st.warning("Please input a natural language request first.")
+
+# --- HUMAN IN THE LOOP VERIFICATION OVERRIDES ---
+if st.session_state.requires_approval:
+    st.divider()
+    st.warning("⚠️ **Human-in-the-Loop Safeguard Activated**")
+    st.markdown("This statement contains administrative database mutation functions and requires review.")
+    
+    edited_sql = st.text_area(
+        "Inspect and Edit Target SQL Statement:",
+        value=st.session_state.pending_sql,
+        height=180
+    )
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅ Confirm Override Execution", use_container_width=True):
+            try:
+                safety_check = db_mgr.check_query_safety(edited_sql)
+                if safety_check["is_safe"]:
+                    res = db_mgr.execute_read_query(edited_sql)
+                    st.success("Override completed successfully.")
+                    st.dataframe(res, use_container_width=True)
+                else:
+                    impact = db_mgr.execute_destructive_query(edited_sql)
+                    st.success(f"Mutation array applied! Impacted row index total: {impact}")
+                
+                st.session_state.requires_approval = False
+            except Exception as ex:
+                st.error(f"Execution failure on override: {ex}")
+    with c2:
+        if st.button("❌ Drop Statement", use_container_width=True):
+            st.session_state.requires_approval = False
+            st.info("Execution sequence dropped safely.")

@@ -1,13 +1,13 @@
-# Python caching files
+# Python bytecode execution caches
 __pycache__/
 *.pyc
 .pytest_cache/
 
-# Streamlit local configurations
+# Local Vector Store Data Indexing
+chroma_db/
+
+# Local Application Data Frameworks
+data/
+
+# Streamlit-specific tracking structures
 .streamlit/
-
-# Local databases (Never upload large data files or production databases)
-data/ecommerce.db
-
-# Environment variables containing sensitive API keys
-.env

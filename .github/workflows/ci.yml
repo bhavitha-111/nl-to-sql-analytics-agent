@@ -1,0 +1,43 @@
+name: Continuous Integration & Quality Assurance
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  quality-assurance:
+    name: Code Auditing and Validation Testing
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Clone Repository Context
+      uses: actions/checkout@v4
+
+    - name: Set up Python Runtime Environment
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Project Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest flake8
+
+    - name: Step 1 - Syntax Validation & Code Linting
+      run: |
+        # Stop the build process instantly if there are Python syntax errors or undefined elements
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit gracefully on style/formatting warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Step 2 - Execute Component Automation Verification
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      run: |
+        export PYTHONPATH=$PYTHONPATH:.
+        # Executes pytest if your tests folder contains testing profiles
+        if [ -d "tests" ]; then pytest; else echo "No active testing directory configured. Skipping automated tests."; fi
