@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom premium CSS insertion for layout polish matching Screenshot 2026-06-19 222135.png
+# Custom premium CSS insertion for layout polish
 st.markdown("""
 <style>
     .reportview-container {
@@ -40,11 +40,22 @@ st.markdown("""
         border-radius: 4px;
         font-family: 'Courier New', Courier, monospace;
     }
-    .stMetric {
-        background-color: #ffffff;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    div[data-testid="metric-container"], .stMetric {
+        background-color: #1e293b !important;
+        border: 1px solid #334155 !important;
+        padding: 15px !important;
+        border-radius: 10px !important;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2) !important;
+    }
+    div[data-testid="metric-container"] label, div[data-testid="metric-container"] [data-testid="stMetricLabel"] {
+        color: #94a3b8 !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+    }
+    div[data-testid="metric-container"] [data-testid="stMetricValue"] {
+        color: #f8fafc !important;
+        font-weight: 700 !important;
+        font-size: 24px !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -54,7 +65,7 @@ st.markdown("""
 def initialize_analytics_backend():
     db_path = "./data/ecommerce.db"
     os.makedirs("./data", exist_ok=True)
-    agent = AnalyticsAgent()
+    agent = AnalyticsAgent(db_path=db_path)
     db_mgr = DatabaseManager(db_path=db_path)
     return agent, db_mgr
 
@@ -83,7 +94,7 @@ def format_sql_vertical(sql: str) -> str:
         
     lines = [line.strip() for line in formatted.split('\n') if line.strip()]
     
-    # Apply modern structural indentation matching Screenshot 2026-06-19 222135.png
+    # Apply modern structural indentation
     indented_lines = []
     for line in lines:
         upper_line = line.upper()
@@ -129,7 +140,12 @@ def render_dynamic_visuals(df: pd.DataFrame, user_query: str):
         cols = st.columns(min(len(df), 3))
         for idx, row in df.head(len(cols)).iterrows():
             with cols[idx]:
-                st.metric(label=str(row[label_col]), value=f"${row[value_col]:,.2f}" if "revenue" in value_col.lower() or "amount" in value_col.lower() else f"{row[value_col]:,}")
+                try:
+                    val = float(row[value_col])
+                    metric_val = f"${val:,.2f}" if any(x in value_col.lower() for x in ['revenue', 'amount', 'price']) else f"{val:,.0f}"
+                except ValueError:
+                    metric_val = str(row[value_col])
+                st.metric(label=str(row[label_col]), value=metric_val)
         
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -157,7 +173,7 @@ if "agent_reasoning" not in st.session_state:
 if "input_query_value" not in st.session_state:
     st.session_state.input_query_value = ""
 
-# --- SIDEBAR CONTROL PANEL CONFIGURATION (Matches Screenshot 2026-06-19 222135.png) ---
+# --- SIDEBAR CONTROL PANEL CONFIGURATION ---
 with st.sidebar:
     st.title("Configuration")
     
@@ -174,7 +190,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Database Environment")
     st.markdown("📁 **Database:** `ecommerce.db`")
-    st.markdown("📋 **Target Tables:** `users`, `products`, `orders`")
+    
+    # Dynamically display tables actually loaded in SQLite
+    live_tables = db_mgr.get_existing_tables()
+    tables_list_str = ", ".join([f"`{t}`" for t in live_tables]) if live_tables else "None detected"
+    st.markdown(f"📋 **Detected Tables:** {tables_list_str}")
     
     st.markdown("---")
     # Interactive sample question list helper matching the original UI blueprint
@@ -218,7 +238,7 @@ if st.button("Run Analysis", type="primary"):
         
         with st.spinner("Analyzing schema vector maps & drafting execution syntax..."):
             try:
-                # Ask LLM model for the schema execution plan
+                # Ask LLM model for the schema execution plan (Dynamic schema injected automatically inside agent)
                 agent_response = agent.generate_query(user_query)
                 st.session_state.agent_reasoning = agent_response.reasoning
                 
@@ -235,18 +255,17 @@ if st.button("Run Analysis", type="primary"):
                     st.session_state.requires_approval = False
                     st.session_state.pending_sql = ""
                     
-                    st.success("Analysis completed successfully.")
-                    
                     # 1. RATIONALE STATEMENT
                     st.info(agent_response.reasoning)
                     
-                    # 2. GENERATED VERTICAL SQL SECTION (Matches Screenshot 2026-06-19 222135.png formatting)
+                    # 2. GENERATED VERTICAL SQL SECTION
                     st.markdown("### 💻 Compiled SQL Syntax")
                     st.code(formatted_sql, language="sql")
                     
-                    # 3. QUERY RESULTS & GRAPHS
+                    # 3. QUERY RESULTS & GRAPHS with Autonomous Self-Healing Retry
                     try:
                         results_df = db_mgr.execute_read_query(formatted_sql)
+                        st.success("Analysis completed successfully.")
                         
                         col1, col2 = st.columns([1, 1])
                         with col1:
@@ -259,8 +278,34 @@ if st.button("Run Analysis", type="primary"):
                             if not results_df.empty:
                                 render_dynamic_visuals(results_df, user_query)
                     except Exception as db_err:
-                        st.error(f"Database Query Fault: {db_err}")
+                        # ACTIVE SELF-HEALING HOOK: Auto-retry once using the runtime exception log!
+                        st.warning(f"⚠️ Initial query run failed with error: {db_err}. Retrying with auto-corrective agent...")
                         
+                        try:
+                            corrected_response = agent.generate_query(user_query, error_info=str(db_err))
+                            corrected_sql = format_sql_vertical(corrected_response.sql_query)
+                            
+                            st.markdown("### 🛠️ Self-Corrected SQL Syntax")
+                            st.code(corrected_sql, language="sql")
+                            
+                            results_df = db_mgr.execute_read_query(corrected_sql)
+                            st.success("Self-correction loop was successful! Retrieved data successfully.")
+                            st.info(f"Correction Log: {corrected_response.reasoning}")
+                            
+                            col1, col2 = st.columns([1, 1])
+                            with col1:
+                                st.write("### 📋 Execution Matrix Results")
+                                if results_df.empty:
+                                    st.warning("Query produced empty rows.")
+                                else:
+                                    st.dataframe(results_df, use_container_width=True)
+                            with col2:
+                                if not results_df.empty:
+                                    render_dynamic_visuals(results_df, user_query)
+                        except Exception as correction_err:
+                            st.error(f"Database Query Fault: {db_err}")
+                            st.error(f"Correction Agent Attempt also failed: {correction_err}")
+                            
             except Exception as agent_err:
                 st.error(f"Evaluation loop failure: {agent_err}")
     else:
