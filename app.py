@@ -8,14 +8,14 @@ import sqlite3
 from src.agent import AnalyticsAgent
 from src.database import DatabaseManager
 
-# Page Styling Customizations
+# Page configuration
 st.set_page_config(
     page_title="E-Commerce AI Analytics Console",
     page_icon="🛒",
     layout="wide"
 )
 
-# Custom premium CSS insertion for layout polish
+# Premium stylesheet injector with Dark Mode high-contrast metric fixes
 st.markdown("""
 <style>
     .reportview-container {
@@ -40,6 +40,7 @@ st.markdown("""
         border-radius: 4px;
         font-family: 'Courier New', Courier, monospace;
     }
+    /* Fixed premium slate container styling for high-contrast visibility */
     div[data-testid="metric-container"], .stMetric {
         background-color: #1e293b !important;
         border: 1px solid #334155 !important;
@@ -60,12 +61,118 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- BACKEND INITIALIZATION CACHE ---
+# Auto-Seeding Database Utility for Cloud Deployments
+def auto_seed_if_empty(db_path: str):
+    """Checks if the database has tables, if not, seeds it automatically."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Check if we have active user tables
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+    tables = cursor.fetchall()
+    
+    if not tables:
+        # Create Users Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            joined_date TEXT NOT NULL,
+            country TEXT NOT NULL
+        );
+        """)
+
+        # Create Products Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            product_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            price REAL NOT NULL,
+            stock_count INTEGER NOT NULL
+        );
+        """)
+
+        # Create Orders Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            order_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        );
+        """)
+
+        # Create Order Items Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS order_items (
+            item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER,
+            product_id INTEGER,
+            quantity INTEGER NOT NULL,
+            price REAL NOT NULL,
+            FOREIGN KEY (order_id) REFERENCES orders(order_id),
+            FOREIGN KEY (product_id) REFERENCES products(product_id)
+        );
+        """)
+
+        # Insert Seed Users
+        users_data = [
+            ("Aarav Sharma", "aarav@email.com", "2024-01-15", "India"),
+            ("Sarah Jenkins", "sarah.j@email.com", "2024-02-10", "United States"),
+            ("Liam O'Connor", "liam@email.com", "2024-03-01", "Canada"),
+            ("Emma Watson", "emma@email.com", "2024-03-22", "United Kingdom"),
+            ("Max Schmidt", "max@email.com", "2024-04-05", "Germany")
+        ]
+        cursor.executemany("INSERT INTO users (name, email, joined_date, country) VALUES (?, ?, ?, ?);", users_data)
+
+        # Insert Seed Products
+        products_data = [
+            ("Smart Wireless Headphones", "Electronics", 129.99, 45),
+            ("Mechanical Keyboard", "Electronics", 89.99, 120),
+            ("Ultra-wide Monitor", "Electronics", 349.99, 15),
+            ("Premium Cotton Hoodie", "Clothing", 49.99, 200),
+            ("Slim Fit Denim Jeans", "Clothing", 59.99, 85),
+            ("Ergonomic Desk Chair", "Home & Kitchen", 189.99, 30),
+            ("Smart Coffee Maker", "Home & Kitchen", 79.99, 8),
+            ("Adjustable Dumbbell Set", "Fitness", 149.99, 12)
+        ]
+        cursor.executemany("INSERT INTO products (product_name, category, price, stock_count) VALUES (?, ?, ?, ?);", products_data)
+
+        # Insert Seed Orders
+        import random
+        from datetime import datetime, timedelta
+        base_date = datetime(2025, 1, 1)
+        
+        for order_id in range(1, 21):
+            user_id = random.randint(1, 5)
+            order_date = (base_date + timedelta(days=random.randint(0, 150))).strftime("%Y-%m-%d")
+            status = random.choice(["Delivered", "Processing", "Shipped"])
+            cursor.execute("INSERT INTO orders (user_id, order_date, status) VALUES (?, ?, ?);", (user_id, order_date, status))
+            
+            # Generate items
+            num_items = random.randint(1, 3)
+            selected_products = random.sample(range(1, 9), num_items)
+            for prod_id in selected_products:
+                cursor.execute("SELECT price FROM products WHERE product_id = ?;", (prod_id,))
+                price = cursor.fetchone()[0]
+                quantity = random.randint(1, 3)
+                cursor.execute("INSERT INTO order_items (order_id, product_id, quantity, price) VALUES (?, ?, ?, ?);", 
+                               (order_id, prod_id, quantity, price))
+        conn.commit()
+    conn.close()
+
 @st.cache_resource
 def initialize_analytics_backend():
     db_path = "./data/ecommerce.db"
     os.makedirs("./data", exist_ok=True)
-    agent = AnalyticsAgent(db_path=db_path)
+    
+    # Securely auto-seed database if running on a fresh environment/cloud deployment
+    auto_seed_if_empty(db_path)
+    
+    agent = AnalyticsAgent(db_history_path="./chroma_db", db_path=db_path)
     db_mgr = DatabaseManager(db_path=db_path)
     return agent, db_mgr
 
@@ -75,16 +182,12 @@ except Exception as e:
     st.error(f"Backend Engine Bootstrap Error: {e}")
     st.stop()
 
-# --- UTILITY FORMATTER FOR VERTICAL SQL RENDERING ---
 def format_sql_vertical(sql: str) -> str:
     """Format and indent raw SQL strings vertically to ensure extreme legibility."""
     keywords = ["SELECT", "FROM", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "JOIN", 
                 "ON", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "UNION", "AND", "OR"]
     
-    # Normalize extra whitespaces first
     sql_clean = " ".join(sql.split())
-    
-    # Break into vertical segments at key syntax junctions
     formatted = sql_clean
     for kw in keywords:
         formatted = re.sub(rf'\b{kw}\b', f'\n{kw}', formatted, flags=re.IGNORECASE)
@@ -94,7 +197,6 @@ def format_sql_vertical(sql: str) -> str:
         
     lines = [line.strip() for line in formatted.split('\n') if line.strip()]
     
-    # Apply modern structural indentation
     indented_lines = []
     for line in lines:
         upper_line = line.upper()
@@ -107,19 +209,17 @@ def format_sql_vertical(sql: str) -> str:
             
     return "\n".join(indented_lines)
 
-# --- AUTO-VISUALIZATION GENERATOR ENGINE ---
 def render_dynamic_visuals(df: pd.DataFrame, user_query: str):
     """Scan columns dynamically to auto-select and render relevant graphical charts."""
     numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
     categorical_cols = df.select_dtypes(exclude=['number']).columns.tolist()
     
     if not numeric_cols:
-        st.info("ℹ️ Results contain only text data. Visual charts require at least one numerical column.")
+        st.info("ℹamp; Results contain only text data. Visual charts require at least one numerical column.")
         return  
         
     st.write("### 📊 Interactive Visual Analytics")
     
-    # Prioritize values representing sales volumes, totals, revenue metrics
     value_col = numeric_cols[0]
     for col in numeric_cols:
         if any(keyword in col.lower() for keyword in ['revenue', 'amount', 'total', 'count', 'sales', 'value', 'price']):
@@ -128,7 +228,6 @@ def render_dynamic_visuals(df: pd.DataFrame, user_query: str):
             
     if categorical_cols:
         label_col = categorical_cols[0]
-        # Inspect for time series indicator variables
         is_time_series = any(any(time_key in col.lower() for time_key in ['month', 'date', 'year', 'day', 'time', 'period']) for col in categorical_cols)
         
         for col in categorical_cols:
@@ -136,7 +235,6 @@ def render_dynamic_visuals(df: pd.DataFrame, user_query: str):
                 label_col = col
                 break
                 
-        # Create summary metrics above charts for elegant reporting style
         cols = st.columns(min(len(df), 3))
         for idx, row in df.head(len(cols)).iterrows():
             with cols[idx]:
@@ -149,7 +247,6 @@ def render_dynamic_visuals(df: pd.DataFrame, user_query: str):
         
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Draw targeted graphical representation based on temporal properties
         if is_time_series:
             st.info(f"Showing chronological progression of `{value_col}` grouped by `{label_col}`")
             st.line_chart(df.set_index(label_col)[value_col], use_container_width=True)
@@ -157,13 +254,11 @@ def render_dynamic_visuals(df: pd.DataFrame, user_query: str):
             st.info(f"Distribution analysis of `{value_col}` ranked by `{label_col}`")
             st.bar_chart(df.set_index(label_col)[value_col], use_container_width=True)
     else:
-        # Single numerical distribution without categories
         if len(numeric_cols) >= 2:
             st.line_chart(df.set_index(numeric_cols[0])[numeric_cols[1]], use_container_width=True)
         else:
             st.bar_chart(df[value_col], use_container_width=True)
 
-# --- STREAMLIT UI SESSION STATES ---
 if "requires_approval" not in st.session_state:
     st.session_state.requires_approval = False
 if "pending_sql" not in st.session_state:
@@ -173,11 +268,9 @@ if "agent_reasoning" not in st.session_state:
 if "input_query_value" not in st.session_state:
     st.session_state.input_query_value = ""
 
-# --- SIDEBAR CONTROL PANEL CONFIGURATION ---
 with st.sidebar:
     st.title("Configuration")
     
-    # Display secret or default demo fallback status safely
     api_key_display = st.secrets.get("GEMINI_API_KEY") or "Using default demo key"
     st.text_input(
         "Gemini API Key", 
@@ -191,13 +284,12 @@ with st.sidebar:
     st.markdown("### Database Environment")
     st.markdown("📁 **Database:** `ecommerce.db`")
     
-    # Dynamically display tables actually loaded in SQLite
+    # Read active SQLite DB dynamically
     live_tables = db_mgr.get_existing_tables()
     tables_list_str = ", ".join([f"`{t}`" for t in live_tables]) if live_tables else "None detected"
     st.markdown(f"📋 **Detected Tables:** {tables_list_str}")
     
     st.markdown("---")
-    # Interactive sample question list helper matching the original UI blueprint
     st.markdown("### 💡 Sample Questions")
     samples = [
         "What are the top 5 product categories by total revenue?",
@@ -208,7 +300,6 @@ with st.sidebar:
     ]
     
     for q in samples:
-        # Clicking any button instantly sets the main input value and triggers rerun
         if st.button(q, key=f"btn_{q}", use_container_width=True):
             st.session_state.input_query_value = q
             st.rerun()
@@ -222,7 +313,6 @@ st.markdown(
 
 st.divider()
 
-# Controlled dynamic text input synced with sidebar sample triggers
 user_query = st.text_area(
     "Your Question",
     value=st.session_state.input_query_value,
@@ -230,22 +320,20 @@ user_query = st.text_area(
     height=100
 )
 
-# Execution trigger
 if st.button("Run Analysis", type="primary"):
     if user_query:
-        # Keep query synced
         st.session_state.input_query_value = user_query
         
         with st.spinner("Analyzing schema vector maps & drafting execution syntax..."):
             try:
-                # Ask LLM model for the schema execution plan (Dynamic schema injected automatically inside agent)
+                # Ask agent for execution plan
                 agent_response = agent.generate_query(user_query)
                 st.session_state.agent_reasoning = agent_response.reasoning
                 
-                # Apply vertical syntax formatter to generated statement 
+                # Format raw SQL cleanly
                 formatted_sql = format_sql_vertical(agent_response.sql_query)
                 
-                # Check execution permission rules inside DB Manager
+                # Check DB read safety settings
                 static_safety_audit = db_mgr.check_query_safety(formatted_sql)
                 
                 if agent_response.confidence_score.upper() == "LOW" or not static_safety_audit["is_safe"]:
@@ -255,14 +343,11 @@ if st.button("Run Analysis", type="primary"):
                     st.session_state.requires_approval = False
                     st.session_state.pending_sql = ""
                     
-                    # 1. RATIONALE STATEMENT
                     st.info(agent_response.reasoning)
                     
-                    # 2. GENERATED VERTICAL SQL SECTION
                     st.markdown("### 💻 Compiled SQL Syntax")
                     st.code(formatted_sql, language="sql")
                     
-                    # 3. QUERY RESULTS & GRAPHS with Autonomous Self-Healing Retry
                     try:
                         results_df = db_mgr.execute_read_query(formatted_sql)
                         st.success("Analysis completed successfully.")
@@ -278,7 +363,7 @@ if st.button("Run Analysis", type="primary"):
                             if not results_df.empty:
                                 render_dynamic_visuals(results_df, user_query)
                     except Exception as db_err:
-                        # ACTIVE SELF-HEALING HOOK: Auto-retry once using the runtime exception log!
+                        # Self-healing loop execution
                         st.warning(f"⚠️ Initial query run failed with error: {db_err}. Retrying with auto-corrective agent...")
                         
                         try:
